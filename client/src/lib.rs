@@ -72,7 +72,7 @@ fn get_term_size(fd: i32) -> std::io::Result<(u16, u16)> {
 impl Client {
     pub fn new(start_server: Option<fn() -> std::io::Result<()>>) -> std::io::Result<Self> {
         let uid = nix::unistd::getuid();
-        let path = Path::new("/run/user")
+        let path = Path::new(protocol::BASE_DIR)
             .join(uid.to_string())
             .join("job-security")
             .join("sock");
@@ -157,7 +157,7 @@ impl Client {
                 InputFlags::INLCR |
                 InputFlags::ISTRIP |
                 InputFlags::IXON);
-            termios.control_chars = [nix::sys::termios::_POSIX_VDISABLE; 32];
+            termios.control_chars = [nix::sys::termios::_POSIX_VDISABLE; libc::NCCS];
             termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 1;
 
             nix::sys::termios::tcsetattr(0, nix::sys::termios::SetArg::TCSANOW, &termios).unwrap();
@@ -252,7 +252,11 @@ impl Client {
                 }
             }
         };
-        conn.into_inner().shutdown().await.unwrap();
+        let res = conn.into_inner().shutdown().await;
+        #[cfg(target_os = "linux")]
+        res.unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let _ = res;
         tracing::trace!("Connection closed");
         // Drain data_channel
         if let Some(mut data_channel) = data_channel {
@@ -270,7 +274,7 @@ impl Client {
 
         drop(_guard);
 
-        tracing::debug!("Connection closed, totoal received: {total_received}");
+        tracing::debug!("Connection closed, total received: {total_received}");
         Ok(status)
     }
 }

@@ -208,3 +208,8 @@ impl<I, O, E: From<std::io::Error>> tokio_util::codec::Decoder
 
 pub type DynServerCodec = Box<dyn Codec<Event, Request, std::io::Error> + Send + Sync + Unpin>;
 pub type DynClientCodec = Box<dyn Codec<Request, Event, std::io::Error> + Send + Sync + Unpin>;
+
+#[cfg(target_os = "macos")]
+pub const BASE_DIR: &str = "/tmp/run/user";
+#[cfg(target_os = "linux")]
+pub const BASE_DIR: &str = "/run/user";

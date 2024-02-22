@@ -9,11 +9,7 @@ use std::{
     time::{self, Duration},
 };
 
-pub use nix::{
-    errno,
-    sys::{signal::Signal, wait::WaitStatus},
-    Error,
-};
+pub use nix::Error;
 use nix::{
     fcntl::{open, OFlag},
     ioctl_write_ptr_bad,
@@ -179,7 +175,8 @@ fn get_term_size(fd: i32) -> Result<(u16, u16)> {
 
 #[derive(Debug)]
 struct Master {
-    fd: PtyMaster,
+    fd:                   PtyMaster,
+    get_slave_name_mutex: std::sync::Mutex<()>,
 }
 
 impl Master {
@@ -190,7 +187,10 @@ impl Master {
             master_fd.as_raw_fd(),
             nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
         )?;
-        Ok(Self { fd: master_fd })
+        Ok(Self {
+            fd:                   master_fd,
+            get_slave_name_mutex: std::sync::Mutex::new(()),
+        })
     }
 
     fn grant_slave_access(&self) -> Result<()> {
@@ -202,7 +202,15 @@ impl Master {
     }
 
     fn get_slave_name(&self) -> Result<String> {
-        get_slave_name(&self.fd)
+        #[cfg(target_os = "linux")]
+        return nix::pty::ptsname_r(&self.fd);
+        #[cfg(target_os = "macos")]
+        return {
+            let _guard = self.get_slave_name_mutex.lock().unwrap();
+            unsafe { nix::pty::ptsname(&self.fd) }
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        unimplemented!();
     }
 
     fn get_slave_fd(&self) -> Result<OwnedFd> {
@@ -227,10 +235,6 @@ impl AsRawFd for Master {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
-}
-
-fn get_slave_name(fd: &PtyMaster) -> Result<String> {
-    nix::pty::ptsname_r(fd)
 }
 
 fn set_echo(fd: RawFd, on: bool) -> Result<()> {

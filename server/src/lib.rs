@@ -148,27 +148,19 @@ fn next_free_slot(v: &mut Vec<Option<Process>>) -> (usize, &mut Option<Process>)
 impl Server {
     pub fn new(runner_args: Vec<OsString>) -> std::io::Result<Self> {
         let uid = nix::unistd::getuid();
-        let runtime_dir = Path::new("/run/user")
+        let runtime_dir = Path::new(protocol::BASE_DIR)
             .join(uid.to_string())
             .join("job-security");
         std::fs::create_dir_all(&runtime_dir)?;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(false)
-            .open(runtime_dir.join("lock"));
-        let file = match file {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(runtime_dir.join("lock"))?,
-            Err(err) => return Err(err),
-        };
+            .create(true)
+            .truncate(false)
+            .open(runtime_dir.join("lock"))?;
         let lock = match FlockGuard::new(file) {
             Ok(lock) => lock,
-            Err(err) if err == nix::errno::Errno::EWOULDBLOCK =>
+            Err(nix::errno::Errno::EWOULDBLOCK) =>
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "another instance is running",
@@ -196,7 +188,8 @@ impl Server {
         Pin<Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
     ) {
         let pipe = tokio::net::UnixStream::pair().unwrap();
-        let mut cmd = tokio::process::Command::new("/proc/self/exe");
+        let exe = palaver::env::exe_path().unwrap();
+        let mut cmd = tokio::process::Command::new(exe);
         cmd.args(command)
             .env("RUNNER_FD", "3")
             .fd_mappings(vec![FdMapping {
@@ -462,12 +455,13 @@ impl Server {
                 &mut buf,
             )
             .unwrap();
-        let Ok(_) = tx.get_mut()
+        let Ok(_) = tx
+            .get_mut()
             .write_with_fd(&buf, &[data_channels.0.as_fd()])
             .await
         else {
-            // The client could have disconnected, which is fine. Don't send the client in this
-            // case. Also set client_connected to false
+            // The client could have disconnected, which is fine. Don't send the client in
+            // this case. Also set client_connected to false
             slot.shared.client_connected.store(false, Ordering::Relaxed);
             return;
         };
@@ -566,7 +560,9 @@ impl Server {
                         let lru = lru.read().await;
                         let mut latest = None;
                         for id in lru.iter().copied() {
-                            let Some(slot) = processes_read[id as usize].as_ref() else { continue };
+                            let Some(slot) = processes_read[id as usize].as_ref() else {
+                                continue
+                            };
                             if !slot.shared.client_connected.load(Ordering::Acquire) &&
                                 !slot.shared.reaped.load(Ordering::Relaxed)
                             {
@@ -578,12 +574,19 @@ impl Server {
                 };
                 let Some(id) = id else {
                     tracing::info!("No process to resume");
-                    stream.send(Event::Error(Error::NotFound { id: None })).await?;
+                    stream
+                        .send(Event::Error(Error::NotFound { id: None }))
+                        .await?;
                     return Ok(())
                 };
-                let Some(slot) = processes_read.get(id as usize).and_then(|slot| slot.as_ref()) else {
+                let Some(slot) = processes_read
+                    .get(id as usize)
+                    .and_then(|slot| slot.as_ref())
+                else {
                     tracing::info!("Process {id} not found");
-                    stream.send(Event::Error(Error::NotFound { id: Some(id) })).await?;
+                    stream
+                        .send(Event::Error(Error::NotFound { id: Some(id) }))
+                        .await?;
                     return Ok(())
                 };
                 if slot.shared.reaped.load(Ordering::Relaxed) {
@@ -739,7 +742,8 @@ impl Runner {
         }
 
         let mut framed = tokio_util::codec::Framed::new(ctl, runner_codec());
-        let RunnerRequest::Start { command, env, pwd } = framed.next().await.unwrap().unwrap() else {
+        let RunnerRequest::Start { command, env, pwd } = framed.next().await.unwrap().unwrap()
+        else {
             panic!();
         };
         let mut cmd = std::process::Command::new(&command[0]);
@@ -770,7 +774,7 @@ impl Runner {
                     );
                     let status = match status {
                         Ok(status) => status,
-                        Err(e) if e == nix::errno::Errno::EAGAIN => continue,
+                        Err(nix::errno::Errno::EAGAIN) => continue,
                         Err(e) => panic!("{}", e),
                     };
                     match status {

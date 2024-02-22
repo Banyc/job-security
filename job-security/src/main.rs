@@ -140,7 +140,10 @@ fn main() -> std::io::Result<ExitCode> {
     let subscriber_builder = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env());
     if let Command::Daemon { log_file } = &opts.command {
-        let server = server::Server::new(vec!["__runner".into()])?;
+        let server = server::Server::new(vec!["__runner".into()]).map_err(|e| {
+            eprintln!("Server::new: {e}");
+            e
+        })?;
         if let Some(log_file) = log_file {
             let log_file = std::fs::OpenOptions::new()
                 .read(false)
@@ -152,7 +155,10 @@ fn main() -> std::io::Result<ExitCode> {
         } else {
             subscriber_builder.init();
         }
-        runtime.block_on(server.run())?;
+        runtime.block_on(server.run()).map_err(|e| {
+            eprintln!("Server::run: {e}");
+            e
+        })?;
         return Ok(ExitCode::SUCCESS)
     }
 
