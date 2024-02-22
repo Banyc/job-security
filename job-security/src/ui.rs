@@ -3,7 +3,7 @@ use std::ops::Deref;
 use protocol::ExitStatus;
 use tabled::{
     grid::{
-        color::AnsiColor,
+        ansi::ANSIBuf,
         config::{
             AlignmentHorizontal, ColorMap, ColoredConfig, Entity, Indent, Sides, SpannedConfig,
         },
@@ -29,14 +29,14 @@ impl ColoredString {
         }
     }
 
-    fn color(&self) -> AnsiColor<'static> {
+    fn color(&self) -> ANSIBuf {
         let mut prefix = Buffer::ansi();
         prefix.set_color(&self.color).unwrap();
         let mut suffix = Buffer::ansi();
         suffix.reset().unwrap();
         let prefix = String::from_utf8(prefix.into_inner()).unwrap();
         let suffix = String::from_utf8(suffix.into_inner()).unwrap();
-        AnsiColor::new(prefix.into(), suffix.into())
+        ANSIBuf::new(prefix, suffix)
     }
 }
 

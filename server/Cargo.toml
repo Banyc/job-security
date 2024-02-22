@@ -10,15 +10,15 @@ edition = "2021"
 
 [dependencies]
 bincode.workspace = true
-dlv-list = "0.5.0"
+dlv-list = "0.5"
 futures-util = { workspace = true, features = ["sink", "alloc"] }
-indexmap = "1.9.3"
+indexmap = "2"
 nix = { workspace = true, features = ["term", "process", "ioctl", "fs"] }
-palaver = "0.2.8"
-protocol = { version = "0.1.1", path = "../protocol", package = "job-security-protocol" }
-serde = { version = "1.0.160", features = ["derive"] }
+palaver = "0.2"
+protocol = { version = "0.1", path = "../protocol", package = "job-security-protocol" }
+serde = { version = "1", features = ["derive"] }
 tokio = { workspace = true, features = ["process", "net", "fs", "macros", "signal", "rt", "io-util"] }
-tokio-command-fds = "0.2.1"
+tokio-command-fds = "0.2"
 tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
 withfd = { workspace = true, features = ["tokio"] }

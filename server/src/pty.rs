@@ -2,7 +2,7 @@
 use std::{
     fs::File,
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, BorrowedFd, OwnedFd},
         unix::prelude::{AsRawFd, FromRawFd, RawFd},
     },
     thread,
@@ -65,7 +65,7 @@ impl PtyProcess {
             command.pre_exec(move || -> std::io::Result<()> {
                 make_controlling_tty(&pts_name)?;
 
-                set_echo(STDIN_FILENO, false)?;
+                set_echo(stdin_fd(), false)?;
                 set_term_size(STDIN_FILENO, cols, rows)?;
                 Ok(())
             });
@@ -109,13 +109,13 @@ impl PtyProcess {
 
     /// The function returns true if an echo setting is setup.
     pub fn get_echo(&self) -> Result<bool> {
-        termios::tcgetattr(self.master.as_raw_fd())
+        termios::tcgetattr(self.master.as_fd())
             .map(|flags| flags.local_flags.contains(termios::LocalFlags::ECHO))
     }
 
     /// Sets a echo setting for a terminal
     pub fn set_echo(&mut self, on: bool, timeout: Option<Duration>) -> Result<bool> {
-        set_echo(self.master.as_raw_fd(), on)?;
+        set_echo(self.master.as_fd(), on)?;
         self.wait_echo(on, timeout)
     }
 
@@ -237,29 +237,36 @@ impl AsRawFd for Master {
     }
 }
 
-fn set_echo(fd: RawFd, on: bool) -> Result<()> {
+impl AsFd for Master {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) }
+    }
+}
+
+fn set_echo(fd: impl AsFd, on: bool) -> Result<()> {
     // Set echo off
     // Even though there may be something left behind https://stackoverflow.com/a/59034084
-    let mut flags = termios::tcgetattr(fd)?;
+    let mut flags = termios::tcgetattr(&fd)?;
     match on {
         true => flags.local_flags |= termios::LocalFlags::ECHO,
         false => flags.local_flags &= !termios::LocalFlags::ECHO,
     }
 
-    termios::tcsetattr(fd, termios::SetArg::TCSANOW, &flags)?;
+    termios::tcsetattr(&fd, termios::SetArg::TCSANOW, &flags)?;
     Ok(())
 }
 
-pub fn set_raw(fd: RawFd) -> Result<()> {
-    let mut flags = termios::tcgetattr(fd)?;
+pub fn set_raw(fd: impl AsFd) -> Result<()> {
+    let mut flags = termios::tcgetattr(&fd)?;
 
     termios::cfmakeraw(&mut flags);
-    termios::tcsetattr(fd, termios::SetArg::TCSANOW, &flags)?;
+    termios::tcsetattr(&fd, termios::SetArg::TCSANOW, &flags)?;
     Ok(())
 }
 
 fn get_this_term_char(char: SpecialCharacterIndices) -> Option<u8> {
     for &fd in &[STDIN_FILENO, STDOUT_FILENO] {
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
         if let Ok(char) = get_term_char(fd, char) {
             return Some(char)
         }
@@ -276,7 +283,7 @@ fn get_eof_char() -> u8 {
     get_this_term_char(SpecialCharacterIndices::VEOF).unwrap_or(DEFAULT_VEOF_CHAR)
 }
 
-fn get_term_char(fd: RawFd, char: SpecialCharacterIndices) -> Result<u8> {
+fn get_term_char(fd: impl AsFd, char: SpecialCharacterIndices) -> Result<u8> {
     let flags = termios::tcgetattr(fd)?;
     let b = flags.control_chars[char as usize];
     Ok(b)
@@ -327,4 +334,8 @@ fn make_controlling_tty(pts_name: &str) -> Result<()> {
     let fd = open("/dev/tty", OFlag::O_WRONLY, Mode::empty())?;
     close(fd)?;
     Ok(())
+}
+
+fn stdin_fd() -> BorrowedFd<'static> {
+    unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) }
 }
