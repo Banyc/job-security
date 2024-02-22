@@ -667,25 +667,29 @@ impl Server {
         let lru = Arc::new(RwLock::new(VecList::new()));
         let runner_args = Arc::new(runner_args);
         let (quit_handle, mut quit) = tokio::sync::mpsc::channel(1);
-        let mut tasks = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = rx.await; // Block forever to make sure `tasks.join_next()` always return `Some`
+            Ok(())
+        });
         loop {
             select! {
                 result = listener.accept() => {
                     let (stream, _) = result?;
-                    tasks.push(tokio::spawn(Self::handle_client(
+                    tasks.spawn(Self::handle_client(
                         stream,
                         processes.clone(),
                         lru.clone(),
                         quit_handle.clone(),
                         runner_args.clone(),
-                    )));
+                    ));
                 },
+                Some(res) = tasks.join_next() => {
+                    res.expect("tokio thread panicked")?;
+                }
                 _ = quit.recv() => break,
             }
-        }
-        for task in tasks {
-            task.abort();
-            let _ = task.await?;
         }
         Ok(())
     }
