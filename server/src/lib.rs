@@ -834,6 +834,14 @@ impl Runner {
                                 nix::sys::signal::Signal::SIGCONT
                             ).unwrap();
                             self.state = State::Resuming;
+                            #[cfg(target_os = "macos")]
+                            {
+                                // `signal.recv()` will NOT be triggered at macOS so we skip it and assume the process state has been back to running
+                                self.state = State::Running;
+                                framed.send(
+                                    RunnerEvent::StateChanged(ProcessState::Running, pid)
+                                ).await.unwrap();
+                            }
                         },
                         RunnerRequest::Start { .. } => {
                             panic!();
