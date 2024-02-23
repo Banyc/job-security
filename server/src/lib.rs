@@ -178,9 +178,9 @@ impl Server {
         })
     }
 
-    /// Fork as a runner child from the server
+    /// Spawn a runner
     ///
-    /// The runner then runs the command
+    /// The runner then spawns the command
     #[allow(clippy::type_complexity)]
     fn start_process(
         command: &Vec<OsString>,
