@@ -1284,8 +1284,9 @@ checksum = "0770833d60a970638e989b3fa9fd2bb1aaadcf88963d1659fd7d9990196ed2d6"
 
 [[package]]
 name = "withfd"
-version = "0.1.1"
-source = "git+https://github.com/Banyc/withfd.git#8d032da8314710ce8dd191fe0669623029be7788"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59cb8dd6df99f686129cabb770116c35281861046bd538927f1b1a3ee5b839be"
 dependencies = [
  "cstr",
  "nix 0.26.4",
