@@ -116,6 +116,12 @@ mod ui;
 use protocol::{ExitStatus, ProcessState};
 use ui::Tui;
 
+/// Main entrance of the command
+///
+/// Each call creates one of the roles:
+/// - daemon (server)
+/// - runner
+/// - client
 fn main() -> std::io::Result<ExitCode> {
     let command = Opts::command()
         .subcommand(clap::Command::new("__runner").hide(true))

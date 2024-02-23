@@ -10,8 +10,12 @@ use tokio::{
 };
 use withfd::WithFdExt;
 
+/// The actual user interface
+///
+/// Each instance represents a user
 pub struct Client {
-    conn: std::os::unix::net::UnixStream,
+    /// Control channel to the server
+    server_ctrl: std::os::unix::net::UnixStream,
 }
 
 struct TerminalStateGuard {
@@ -81,9 +85,9 @@ impl Client {
             .join(uid.to_string())
             .join("job-security")
             .join("sock");
-        let conn = std::os::unix::net::UnixStream::connect(&path);
-        match conn {
-            Ok(conn) => return Ok(Self { conn }),
+        let server_ctrl = std::os::unix::net::UnixStream::connect(&path);
+        match server_ctrl {
+            Ok(server_ctrl) => return Ok(Self { server_ctrl }),
             Err(e)
                 if (e.kind() == std::io::ErrorKind::NotFound ||
                     e.kind() == std::io::ErrorKind::ConnectionRefused) &&
@@ -96,8 +100,8 @@ impl Client {
         start_server()?;
 
         // Retry after server is started
-        let conn = std::os::unix::net::UnixStream::connect(&path)?;
-        Ok(Self { conn })
+        let server_ctrl = std::os::unix::net::UnixStream::connect(&path)?;
+        Ok(Self { server_ctrl })
     }
 
     pub async fn run(
@@ -106,10 +110,11 @@ impl Client {
         mut req: protocol::Request,
         detach: bool,
     ) -> std::io::Result<Option<ProcessState>> {
-        let Self { conn } = self;
-        conn.set_nonblocking(true)?;
-        let conn: UnixStream = conn.try_into()?;
-        let mut conn = tokio_util::codec::Framed::new(conn.with_fd(), protocol::client_codec());
+        let Self { server_ctrl } = self;
+        server_ctrl.set_nonblocking(true)?;
+        let server_ctrl: UnixStream = server_ctrl.try_into()?;
+        let mut server_ctrl =
+            tokio_util::codec::Framed::new(server_ctrl.with_fd(), protocol::client_codec());
 
         if let protocol::Request::Start { cols, rows, .. } = &mut req {
             if *cols == 0 && *rows == 0 {
@@ -119,7 +124,7 @@ impl Client {
             }
         }
 
-        conn.send(req.clone()).await?;
+        server_ctrl.send(req.clone()).await?;
         if detach {
             return Ok(None)
         }
@@ -128,7 +133,7 @@ impl Client {
         match req {
             protocol::Request::ListProcesses => {
                 let mut processes = Vec::new();
-                while let Some(msg) = conn.next().await {
+                while let Some(msg) = server_ctrl.next().await {
                     match msg? {
                         protocol::Event::Process(p) => processes.push(p),
                         _ => unreachable!("Server sent an unexpected event"),
@@ -200,7 +205,7 @@ impl Client {
         let mut id = None;
         let status = loop {
             select! {
-                event = conn.next() => {
+                event = server_ctrl.next() => {
                     tracing::info!("event: {:?}", event);
                     let Some(event) = event else {
                         return Err(std::io::ErrorKind::UnexpectedEof.into())
@@ -209,7 +214,7 @@ impl Client {
                     match event {
                         protocol::Event::StateChanged { state: ProcessState::Running, id: remote_id } => {
                             id = Some(remote_id);
-                            let fd = conn.get_mut().take_fds().next().unwrap();
+                            let fd = server_ctrl.get_mut().take_fds().next().unwrap();
                             data_channel = Some(std::os::unix::net::UnixStream::from(fd).try_into()?);
                         },
                         protocol::Event::StateChanged { state: state @ ProcessState::Stopped, .. } => {
@@ -228,7 +233,7 @@ impl Client {
                             if let Some(id) = id {
                                 let (our_cols, our_rows) = get_term_size(nix::libc::STDOUT_FILENO)?;
                                 if our_cols != cols || our_rows != rows {
-                                    conn.send(protocol::Request::WindowSize {
+                                    server_ctrl.send(protocol::Request::WindowSize {
                                         id,
                                         rows: our_rows,
                                         cols: our_cols
@@ -247,7 +252,7 @@ impl Client {
                 _ = signal.recv() => {
                     let (cols, rows) = get_term_size(nix::libc::STDOUT_FILENO)?;
                     if let Some(id) = id {
-                        conn.send(protocol::Request::WindowSize { id, rows, cols }).await?;
+                        server_ctrl.send(protocol::Request::WindowSize { id, rows, cols }).await?;
                     }
                 }
                 input = stdin_rx.recv() => {
@@ -258,7 +263,7 @@ impl Client {
                 }
             }
         };
-        let res = conn.into_inner().shutdown().await;
+        let res = server_ctrl.into_inner().shutdown().await;
         #[cfg(target_os = "linux")]
         res.unwrap();
         #[cfg(not(target_os = "linux"))]

@@ -52,7 +52,7 @@ impl Runner {
         self.real_run(file).await;
     }
 
-    async fn real_run(mut self, ctl: UnixStream) {
+    async fn real_run(mut self, server_ctrl: UnixStream) {
         // Reset relevant signal handlers
         use nix::sys::signal;
         unsafe {
@@ -63,8 +63,8 @@ impl Runner {
             signal::sigprocmask(signal::SigmaskHow::SIG_SETMASK, Some(&sigset), None).unwrap();
         }
 
-        let mut framed = tokio_util::codec::Framed::new(ctl, runner_codec());
-        let RunnerRequest::Start { command, env, pwd } = framed.next().await.unwrap().unwrap()
+        let mut server_ctrl = tokio_util::codec::Framed::new(server_ctrl, runner_codec());
+        let RunnerRequest::Start { command, env, pwd } = server_ctrl.next().await.unwrap().unwrap()
         else {
             panic!();
         };
@@ -83,7 +83,7 @@ impl Runner {
         let mut signal =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).unwrap();
         nix::unistd::setpgid(Pid::from_raw(pid as i32), Pid::from_raw(pid as i32)).ok();
-        framed
+        server_ctrl
             .send(RunnerEvent::StateChanged(ProcessState::Running, pid))
             .await
             .unwrap();
@@ -101,7 +101,7 @@ impl Runner {
                     };
                     match status {
                         WaitStatus::Exited(_, ec) => {
-                            framed.send(
+                            server_ctrl.send(
                                 RunnerEvent::StateChanged(
                                     ProcessState::Terminated(ExitStatus::Exited(ec)),
                                     pid
@@ -110,7 +110,7 @@ impl Runner {
                             break;
                         },
                         WaitStatus::Signaled(_, sig, _) => {
-                            framed.send(
+                            server_ctrl.send(
                                 RunnerEvent::StateChanged(
                                     ProcessState::Terminated(ExitStatus::Signaled(sig as i32)),
                                     pid
@@ -124,21 +124,21 @@ impl Runner {
                                 std::io::stdin().as_raw_fd(),
                                 nix::unistd::getpid()
                             ).unwrap();
-                            framed.send(
+                            server_ctrl.send(
                                 RunnerEvent::StateChanged(ProcessState::Stopped, pid)
                             ).await.unwrap();
                         },
                         WaitStatus::StillAlive => {
                             assert_eq!(self.state, State::Resuming);
                             self.state = State::Running;
-                            framed.send(
+                            server_ctrl.send(
                                 RunnerEvent::StateChanged(ProcessState::Running, pid)
                             ).await.unwrap();
                         },
                         x => unreachable!("{x:?}"),
                     }
                 },
-                req = framed.next() => {
+                req = server_ctrl.next() => {
                     let req = req.unwrap().unwrap();
                     match req {
                         RunnerRequest::Resume => {
@@ -156,7 +156,7 @@ impl Runner {
                             {
                                 // `signal.recv()` will NOT be triggered at macOS so we skip it and assume the process state has been back to running
                                 self.state = State::Running;
-                                framed.send(
+                                server_ctrl.send(
                                     RunnerEvent::StateChanged(ProcessState::Running, pid)
                                 ).await.unwrap();
                             }
@@ -168,6 +168,6 @@ impl Runner {
                 },
             }
         }
-        framed.get_mut().flush().await.unwrap();
+        server_ctrl.get_mut().flush().await.unwrap();
     }
 }

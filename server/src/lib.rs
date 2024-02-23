@@ -73,9 +73,9 @@ fn server_codec() -> impl tokio_util::codec::Encoder<RunnerRequest, Error = std:
     )
 }
 
-struct Client {
-    event: Framed<WithFd<UnixStream>, protocol::DynServerCodec>,
-    data:  UnixStream,
+struct ClientChannel {
+    ctrl: Framed<WithFd<UnixStream>, protocol::DynServerCodec>,
+    data: UnixStream,
 }
 
 struct ProcessShared {
@@ -98,16 +98,21 @@ struct ProcessShared {
 }
 
 struct Process {
-    shared: Arc<ProcessShared>,
-    ctl:    Pin<Box<dyn Sink<RunnerRequest, Error = std::io::Error> + Send + Sync>>,
-    client: Sender<(Client, bool)>,
+    /// State shared between the server and the runner
+    runner_shared: Arc<ProcessShared>,
+    ctrl_tx:       Pin<Box<dyn Sink<RunnerRequest, Error = std::io::Error> + Send + Sync>>,
+    new_client:    Sender<(ClientChannel, bool)>,
 }
 
 pub struct Server {
+    /// Listener of the control channel between clients and this server
     listener:    std::os::unix::net::UnixListener,
+    /// Arguments to spawn a runner
+    ///
     /// When a runner is needed, `Server` will exec `/proc/self/exe` with
     /// `runner_args` as argument.
     runner_args: Vec<OsString>,
+    /// Exclusive lock for the existence of this server
     lock:        FlockGuard,
 }
 
@@ -131,7 +136,7 @@ impl Drop for FlockGuard {
 fn next_free_slot(v: &mut Vec<Option<Process>>) -> (usize, &mut Option<Process>) {
     if let Some((i, _)) = v.iter().enumerate().find(|(_, slot)| {
         slot.as_ref()
-            .map(|slot| slot.shared.reaped.load(Ordering::Relaxed))
+            .map(|slot| slot.runner_shared.reaped.load(Ordering::Relaxed))
             .unwrap_or(true)
     }) {
         (i, &mut v[i])
@@ -173,6 +178,9 @@ impl Server {
         })
     }
 
+    /// Fork as a runner child from the server
+    ///
+    /// The runner then runs the command
     #[allow(clippy::type_complexity)]
     fn start_process(
         command: &Vec<OsString>,
@@ -200,12 +208,17 @@ impl Server {
         (pty, Box::pin(tx), Box::pin(rx.fuse()))
     }
 
-    async fn handle_runner(
+    /// Relay message between zero or one client and a runner
+    ///
+    /// `shared`: shared state between this server and the runner
+    async fn handle_runner_channels(
         id: u32,
         shared: Arc<ProcessShared>,
         lru: Arc<RwLock<VecList<u32>>>,
-        mut client_rx: Receiver<(Client, bool)>,
-        mut event: Pin<Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
+        mut new_client_rx: Receiver<(ClientChannel, bool)>,
+        mut runner_ctrl_rx: Pin<
+            Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>,
+        >,
     ) -> std::io::Result<()> {
         use tokio::io::AsyncReadExt;
         let pty: OwnedFd = shared.pty.get_raw_handle().unwrap().into();
@@ -218,7 +231,7 @@ impl Server {
         let mut pty_read_buf = [0u8; 1024];
         let mut client_read_buf = [0u8; 1024];
         let mut client_write_buf = BytesMut::with_capacity(1024);
-        let mut client_event: Option<Framed<WithFd<UnixStream>, protocol::DynServerCodec>> = None;
+        let mut client_ctrl: Option<Framed<WithFd<UnixStream>, protocol::DynServerCodec>> = None;
         let (mut client_read, mut client_write) =
             tokio::io::split(OptionIo::<UnixStream>::default());
         let mut verdict = ProcessState::Running;
@@ -290,25 +303,25 @@ impl Server {
                         }
                     }
                 },
-                new_client = client_rx.recv() => {
-                    assert!(client_event.is_none());
-                    let (Client { event, data }, with_output) = new_client.unwrap();
+                new_client = new_client_rx.recv() => {
+                    assert!(client_ctrl.is_none());
+                    let (ClientChannel { ctrl, data }, with_output) = new_client.unwrap();
                     tracing::info!("New client connected, {with_output}");
-                    client_event = Some(event);
+                    client_ctrl = Some(ctrl);
                     (client_read, client_write) = tokio::io::split(Some(data).into());
                     if !with_output {
                         client_write_buf.clear();
                     }
                     false
                 },
-                req = OptionFuture::from(client_event.as_mut().map(|e| e.next())), if client_event.is_some() => {
+                req = OptionFuture::from(client_ctrl.as_mut().map(|e| e.next())), if client_ctrl.is_some() => {
                     let req = req.unwrap();
                     if let Some(Ok(req)) = req {
                         if let protocol::Request::WindowSize { rows, cols, .. } = req {
                             tracing::info!("Setting window size to {rows}x{cols}");
                             shared.pty.set_window_size(cols, rows).unwrap();
                         } else {
-                            client_event.as_mut()
+                            client_ctrl.as_mut()
                                 .unwrap()
                                 .send(protocol::Event::Error(protocol::Error::InvalidRequest))
                                 .await?;
@@ -318,7 +331,7 @@ impl Server {
                         true
                     }
                 },
-                e = event.next(), if !event.is_terminated() => match e {
+                e = runner_ctrl_rx.next(), if !runner_ctrl_rx.is_terminated() => match e {
                     Some(Ok(RunnerEvent::StateChanged(e, _))) => {
                         tracing::info!("New runner state: {e:?}");
                         *shared.state.write().await = e;
@@ -326,7 +339,7 @@ impl Server {
                             ProcessState::Stopped => {
                                 // New process state is Stopped.
 
-                                if let Some(client_event) = &mut client_event {
+                                if let Some(client_ctrl) = &mut client_ctrl {
                                     // We are going to detach the client, so try to flush client_write_buf first.
                                     //
                                     // this is best effort, because the client could disconnect as we try
@@ -342,10 +355,10 @@ impl Server {
                                     }
 
                                     tracing::info!("Sending Stopped to the client");
-                                    let _ = client_event.send(protocol::Event::StateChanged {
+                                    let _ = client_ctrl.send(protocol::Event::StateChanged {
                                         id, state: ProcessState::Stopped
                                     }).await;
-                                    let _ = client_event.flush().await;
+                                    let _ = client_ctrl.flush().await;
                                 }
 
                                 // Fix use of partially move client_read/client_write
@@ -363,9 +376,9 @@ impl Server {
                                 false
                             },
                             ProcessState::Running => {
-                                if let Some(client_event) = &mut client_event {
+                                if let Some(client_ctrl) = &mut client_ctrl {
                                     let (cols, rows) = *shared.size.read().await;
-                                    client_event.send(protocol::Event::WindowSize { cols, rows }).await.is_err()
+                                    client_ctrl.send(protocol::Event::WindowSize { cols, rows }).await.is_err()
                                 } else {
                                     false
                                 }
@@ -399,7 +412,7 @@ impl Server {
                 if pty_read_finished {
                     // The job has terminated, and we have read and sent all the output data.
                     // Now try to send the final verdict, if successful, we can reap the process
-                    let mut client_event = client_event.take().unwrap();
+                    let mut client_event = client_ctrl.take().unwrap();
                     tracing::info!("Sending final process state {verdict:?} to the client");
                     let sent = client_event
                         .send(protocol::Event::StateChanged { id, state: verdict })
@@ -422,7 +435,7 @@ impl Server {
                     shared.client_connected.load(Ordering::Relaxed)
                 );
                 (client_read, client_write) = tokio::io::split(None.into());
-                client_event = None;
+                client_ctrl = None;
                 shared.client_connected.store(false, Ordering::Release);
             }
         }
@@ -433,16 +446,17 @@ impl Server {
         Ok(())
     }
 
-    async fn setup_data_channel(
+    async fn setup_client_server_data_channel(
         id: u32,
         slot: &Process,
-        mut tx: Framed<WithFd<UnixStream>, protocol::DynServerCodec>,
+        mut ctrl_tx: Framed<WithFd<UnixStream>, protocol::DynServerCodec>,
         with_output: bool,
     ) {
         // Send Started event with the file descriptor
         let mut buf = BytesMut::new();
         let data_channels = tokio::net::UnixStream::pair().unwrap();
-        tx.codec_mut()
+        ctrl_tx
+            .codec_mut()
             .encode(
                 protocol::Event::StateChanged {
                     id,
@@ -451,21 +465,23 @@ impl Server {
                 &mut buf,
             )
             .unwrap();
-        let Ok(_) = tx
+        let Ok(_) = ctrl_tx
             .get_mut()
             .write_with_fd(&buf, &[data_channels.0.as_fd()])
             .await
         else {
             // The client could have disconnected, which is fine. Don't send the client in
             // this case. Also set client_connected to false
-            slot.shared.client_connected.store(false, Ordering::Relaxed);
+            slot.runner_shared
+                .client_connected
+                .store(false, Ordering::Relaxed);
             return;
         };
-        slot.client
+        slot.new_client
             .send((
-                Client {
-                    data:  data_channels.1,
-                    event: tx,
+                ClientChannel {
+                    data: data_channels.1,
+                    ctrl: ctrl_tx,
                 },
                 with_output,
             ))
@@ -479,7 +495,7 @@ impl Server {
             .unwrap();
     }
 
-    async fn handle_client(
+    async fn handle_new_client(
         stream: tokio::net::UnixStream,
         processes: Arc<RwLock<Vec<Option<Process>>>>,
         lru: Arc<RwLock<VecList<u32>>>,
@@ -493,13 +509,13 @@ impl Server {
                     + Sync
                     + Unpin,
             >;
-        let mut stream = tokio_util::codec::Framed::new(stream.with_fd(), codec);
+        let mut client_ctrl = tokio_util::codec::Framed::new(stream.with_fd(), codec);
 
-        let Some(request) = stream.next().await else {
+        let Some(request) = client_ctrl.next().await else {
             return Ok(())
         };
         let request = request?;
-        let client_channel = tokio::sync::mpsc::channel(1);
+        let new_client = tokio::sync::mpsc::channel(1);
         match request {
             protocol::Request::Start {
                 command,
@@ -509,21 +525,23 @@ impl Server {
                 cols,
             } => {
                 let mut processes = processes.write().await;
-                let (pty, mut ctl, mut evt) = Self::start_process(&runner_args, rows, cols);
+                let (pty, mut runner_ctrl_tx, mut runner_ctrl_rx) =
+                    Self::start_process(&runner_args, rows, cols);
                 let (id, slot) = next_free_slot(&mut processes);
                 let id = id as u32;
                 let index = lru.write().await.push_back(id);
-                ctl.send(RunnerRequest::Start {
-                    command: command.clone(),
-                    env,
-                    pwd,
-                })
-                .await?;
-                let x = evt.next().await;
+                runner_ctrl_tx
+                    .send(RunnerRequest::Start {
+                        command: command.clone(),
+                        env,
+                        pwd,
+                    })
+                    .await?;
+                let x = runner_ctrl_rx.next().await;
                 let Some(Ok(RunnerEvent::StateChanged(ProcessState::Running, pid))) = &x else {
                     panic!("{x:?}")
                 };
-                let shared = Arc::new(ProcessShared {
+                let runner_shared = Arc::new(ProcessShared {
                     pid: *pid,
                     key: index,
                     command,
@@ -534,17 +552,23 @@ impl Server {
                     size: RwLock::new((cols, rows)),
                 });
                 let slot = slot.insert(Process {
-                    shared: shared.clone(),
-                    ctl,
-                    client: client_channel.0,
+                    runner_shared: runner_shared.clone(),
+                    ctrl_tx:       runner_ctrl_tx,
+                    new_client:    new_client.0,
                 });
 
-                Self::setup_data_channel(id, slot, stream, false).await;
+                Self::setup_client_server_data_channel(id, slot, client_ctrl, false).await;
 
                 tokio::spawn(async move {
-                    Self::handle_runner(id, shared, lru.clone(), client_channel.1, evt)
-                        .await
-                        .unwrap()
+                    Self::handle_runner_channels(
+                        id,
+                        runner_shared,
+                        lru.clone(),
+                        new_client.1,
+                        runner_ctrl_rx,
+                    )
+                    .await
+                    .unwrap()
                 });
             },
             protocol::Request::Resume { id, with_output } => {
@@ -559,8 +583,8 @@ impl Server {
                             let Some(slot) = processes_read[id as usize].as_ref() else {
                                 continue
                             };
-                            if !slot.shared.client_connected.load(Ordering::Acquire) &&
-                                !slot.shared.reaped.load(Ordering::Relaxed)
+                            if !slot.runner_shared.client_connected.load(Ordering::Acquire) &&
+                                !slot.runner_shared.reaped.load(Ordering::Relaxed)
                             {
                                 latest = Some(id);
                             }
@@ -570,7 +594,7 @@ impl Server {
                 };
                 let Some(id) = id else {
                     tracing::info!("No process to resume");
-                    stream
+                    client_ctrl
                         .send(Event::Error(Error::NotFound { id: None }))
                         .await?;
                     return Ok(())
@@ -580,32 +604,32 @@ impl Server {
                     .and_then(|slot| slot.as_ref())
                 else {
                     tracing::info!("Process {id} not found");
-                    stream
+                    client_ctrl
                         .send(Event::Error(Error::NotFound { id: Some(id) }))
                         .await?;
                     return Ok(())
                 };
-                if slot.shared.reaped.load(Ordering::Relaxed) {
+                if slot.runner_shared.reaped.load(Ordering::Relaxed) {
                     tracing::info!("Process {id} not found");
-                    stream
+                    client_ctrl
                         .send(Event::Error(Error::NotFound { id: Some(id) }))
                         .await?;
                     return Ok(())
                 }
                 if slot
-                    .shared
+                    .runner_shared
                     .client_connected
                     .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                     .is_err()
                 {
                     tracing::info!("Process {id} already has a client");
-                    stream
+                    client_ctrl
                         .send(Event::Error(Error::AlreadyConnected { id }))
                         .await?;
                     return Ok(())
                 }
                 // At most one client can reach this point
-                let need_resuming = *slot.shared.state.read().await == ProcessState::Stopped;
+                let need_resuming = *slot.runner_shared.state.read().await == ProcessState::Stopped;
                 drop(processes_read);
 
                 // A stopped process cannot spontaneously resume, so we can safely assume even
@@ -613,13 +637,13 @@ impl Server {
                 let mut processes = processes.write().await;
                 let slot = processes[id as usize].as_mut().unwrap();
                 if need_resuming {
-                    slot.ctl.send(RunnerRequest::Resume).await?;
+                    slot.ctrl_tx.send(RunnerRequest::Resume).await?;
                 }
                 tracing::info!("Client is reconnecting to job {id}");
-                Self::setup_data_channel(id, slot, stream, with_output).await;
+                Self::setup_client_server_data_channel(id, slot, client_ctrl, with_output).await;
             },
             protocol::Request::WindowSize { .. } => {
-                stream
+                client_ctrl
                     .send(protocol::Event::Error(protocol::Error::InvalidRequest))
                     .await?;
             },
@@ -627,16 +651,23 @@ impl Server {
                 let processes = processes.read().await;
                 for (id, process) in processes.iter().enumerate() {
                     let Some(process) = process else { continue };
-                    let connected = process.shared.client_connected.load(Ordering::Acquire);
-                    if process.shared.reaped.load(Ordering::Relaxed) {
+                    let connected = process
+                        .runner_shared
+                        .client_connected
+                        .load(Ordering::Acquire);
+                    if process.runner_shared.reaped.load(Ordering::Relaxed) {
                         continue
                     }
-                    let state = *process.shared.state.read().await;
+                    let state = *process.runner_shared.state.read().await;
                     tracing::info!("Sending process {id} {state:?} {connected}");
-                    stream
+                    client_ctrl
                         .send(protocol::Event::Process(protocol::Process {
-                            command: process.shared.command.as_slice().join(OsStr::new(" ")),
-                            pid: process.shared.pid,
+                            command: process
+                                .runner_shared
+                                .command
+                                .as_slice()
+                                .join(OsStr::new(" ")),
+                            pid: process.runner_shared.pid,
                             id: id as u32,
                             state,
                             connected,
@@ -673,7 +704,7 @@ impl Server {
             select! {
                 result = listener.accept() => {
                     let (stream, _) = result?;
-                    tasks.spawn(Self::handle_client(
+                    tasks.spawn(Self::handle_new_client(
                         stream,
                         processes.clone(),
                         lru.clone(),
