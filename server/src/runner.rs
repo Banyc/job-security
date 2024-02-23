@@ -155,6 +155,7 @@ impl Runner {
                             #[cfg(target_os = "macos")]
                             {
                                 // `signal.recv()` will NOT be triggered at macOS so we skip it and assume the process state has been back to running
+                                // Ref: <https://stackoverflow.com/q/48487935/9920172>
                                 self.state = State::Running;
                                 server_ctrl.send(
                                     RunnerEvent::StateChanged(ProcessState::Running, pid)
