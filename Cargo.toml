@@ -13,6 +13,6 @@ tokio = "1"
 bincode = "1"
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false }
-withfd = "0.1"
+withfd = { version = "0.1", git = "https://github.com/Banyc/withfd.git" }
 tracing = "0.1"
 libc = "0.2"
