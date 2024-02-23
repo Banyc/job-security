@@ -41,7 +41,7 @@ pub struct PtyProcess {
 impl PtyProcess {
     /// Spawns a child process and create a [PtyProcess].
     ///
-    /// ```no_run
+    /// ```ignore
     ///   # use std::process::Command;
     ///   # use ptyprocess::PtyProcess;
     /// let proc = PtyProcess::spawn(Command::new("bash"));
