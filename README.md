@@ -28,6 +28,10 @@ cargo install job-security
   ```bash
   jobs run command -- arguments
   ```
+  , or
+  ```bash
+  jobs run -- command arguments
+  ```
 - to suspend/stop a running program, Ctrl-Z!
 - to resume, use
   ```bash
