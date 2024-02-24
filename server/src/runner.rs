@@ -1,5 +1,5 @@
 use std::os::{
-    fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd},
     unix::process::CommandExt,
 };
 
@@ -26,7 +26,7 @@ pub struct Runner {
     state: State,
 }
 
-fn set_foreground(fd: RawFd, foreground: Pid) -> nix::Result<()> {
+fn set_foreground(fd: BorrowedFd<'_>, foreground: Pid) -> nix::Result<()> {
     use nix::sys::signal;
     let mut sigset = signal::SigSet::empty();
     //sigset.add(signal::Signal::SIGTSTP);
@@ -73,7 +73,7 @@ impl Runner {
         unsafe {
             cmd.pre_exec(|| {
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))?;
-                set_foreground(std::io::stdin().as_raw_fd(), nix::unistd::getpid())?;
+                set_foreground(std::io::stdin().as_fd(), nix::unistd::getpid())?;
                 Ok(())
             });
         }
@@ -121,7 +121,7 @@ impl Runner {
                         WaitStatus::Stopped(_, _) => {
                             self.state = State::Stopped;
                             set_foreground(
-                                std::io::stdin().as_raw_fd(),
+                                std::io::stdin().as_fd(),
                                 nix::unistd::getpid()
                             ).unwrap();
                             server_ctrl.send(
@@ -129,11 +129,14 @@ impl Runner {
                             ).await.unwrap();
                         },
                         WaitStatus::StillAlive => {
-                            assert_eq!(self.state, State::Resuming);
-                            self.state = State::Running;
-                            server_ctrl.send(
-                                RunnerEvent::StateChanged(ProcessState::Running, pid)
-                            ).await.unwrap();
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                assert_eq!(self.state, State::Resuming);
+                                self.state = State::Running;
+                                server_ctrl.send(
+                                    RunnerEvent::StateChanged(ProcessState::Running, pid)
+                                ).await.unwrap();
+                            }
                         },
                         x => unreachable!("{x:?}"),
                     }
@@ -144,7 +147,7 @@ impl Runner {
                         RunnerRequest::Resume => {
                             assert_eq!(self.state, State::Stopped);
                             set_foreground(
-                                std::io::stdin().as_raw_fd(),
+                                std::io::stdin().as_fd(),
                                 Pid::from_raw(pid as i32)
                             ).unwrap();
                             nix::sys::signal::kill(

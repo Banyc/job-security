@@ -1,7 +1,6 @@
-use std::{os::fd::BorrowedFd, path::Path};
+use std::{os::fd::AsFd, path::Path};
 
 use futures_util::{future::OptionFuture, SinkExt, StreamExt};
-use libc::STDIN_FILENO;
 use protocol::ProcessState;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,7 +24,7 @@ struct TerminalStateGuard {
 impl Drop for TerminalStateGuard {
     fn drop(&mut self) {
         nix::sys::termios::tcsetattr(
-            stdin_fd(),
+            std::io::stdin().as_fd(),
             nix::sys::termios::SetArg::TCSANOW,
             &self.original,
         )
@@ -151,7 +150,7 @@ impl Client {
 
         let _guard = {
             use nix::sys::termios::{InputFlags, LocalFlags, OutputFlags};
-            let original_termios = nix::sys::termios::tcgetattr(stdin_fd()).unwrap();
+            let original_termios = nix::sys::termios::tcgetattr(std::io::stdin().as_fd()).unwrap();
             let mut termios = original_termios.clone();
             termios.local_flags &= !(LocalFlags::ECHO |
                 LocalFlags::ECHONL |
@@ -170,8 +169,12 @@ impl Client {
             termios.control_chars = [nix::sys::termios::_POSIX_VDISABLE; libc::NCCS];
             termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 1;
 
-            nix::sys::termios::tcsetattr(stdin_fd(), nix::sys::termios::SetArg::TCSANOW, &termios)
-                .unwrap();
+            nix::sys::termios::tcsetattr(
+                std::io::stdin().as_fd(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &termios,
+            )
+            .unwrap();
             TerminalStateGuard {
                 original: original_termios,
             }
@@ -194,7 +197,7 @@ impl Client {
             while let Some(data) = stdout_rx.blocking_recv() {
                 let mut data = &data[..];
                 while !data.is_empty() {
-                    let nbytes = nix::unistd::write(libc::STDOUT_FILENO, data).unwrap();
+                    let nbytes = nix::unistd::write(std::io::stdout().as_fd(), data).unwrap();
                     data = &data[nbytes..];
                 }
             }
@@ -288,8 +291,4 @@ impl Client {
         tracing::debug!("Connection closed, total received: {total_received}");
         Ok(status)
     }
-}
-
-fn stdin_fd() -> BorrowedFd<'static> {
-    unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) }
 }
