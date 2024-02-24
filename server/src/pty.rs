@@ -65,7 +65,7 @@ impl PtyProcess {
             command.pre_exec(move || -> std::io::Result<()> {
                 make_controlling_tty(&pts_name)?;
 
-                set_echo(stdin_fd(), false)?;
+                set_echo(std::io::stdin().as_fd(), false)?;
                 set_term_size(STDIN_FILENO, cols, rows)?;
                 Ok(())
             });
@@ -331,8 +331,4 @@ fn make_controlling_tty(pts_name: &str) -> Result<()> {
     let fd = open("/dev/tty", OFlag::O_WRONLY, Mode::empty())?;
     close(fd)?;
     Ok(())
-}
-
-fn stdin_fd() -> BorrowedFd<'static> {
-    unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) }
 }
