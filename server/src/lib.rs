@@ -694,11 +694,6 @@ impl Server {
         let runner_args = Arc::new(runner_args);
         let (quit_handle, mut quit) = tokio::sync::mpsc::channel(1);
         let mut tasks = tokio::task::JoinSet::new();
-        tasks.spawn(async move {
-            let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
-            let _ = rx.await; // Block forever to make sure `tasks.join_next()` always return `Some`
-            Ok(())
-        });
         loop {
             select! {
                 result = listener.accept() => {
