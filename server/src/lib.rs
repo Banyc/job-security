@@ -252,18 +252,20 @@ impl Server {
                 ready = pty.readable(), if !pty_read_finished => {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
-                        let nbytes = nix::unistd::read(inner.get_ref().as_raw_fd(), &mut pty_read_buf[..])?;
-                        if nbytes == 0 {
-                            return Err(std::io::ErrorKind::WouldBlock.into());
-                        }
-                        Ok(nbytes)
+                        Ok(nix::unistd::read(inner.get_ref().as_raw_fd(), &mut pty_read_buf[..])?)
                     }) {
-                        if let Ok(nbytes) = nbytes {
-                            client_write_buf.reserve(nbytes);
-                            client_write_buf.put_slice(&pty_read_buf[..nbytes]);
-                        } else {
-                            tracing::info!("Read everything from pty, read resulted in error.");
-                            pty_read_finished = true;
+                        match nbytes {
+                            Ok(0) => {
+                                pty_read_finished = true;
+                            }
+                            Ok(nbytes) => {
+                                client_write_buf.reserve(nbytes);
+                                client_write_buf.put_slice(&pty_read_buf[..nbytes]);
+                            }
+                            Err(e) => {
+                                tracing::info!("pty read: {e}");
+                                pty_read_finished = true;
+                            }
                         }
                     }
                     false
