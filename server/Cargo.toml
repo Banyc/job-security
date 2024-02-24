@@ -14,7 +14,6 @@ dlv-list = "0.5"
 futures-util = { workspace = true, features = ["sink", "alloc"] }
 indexmap = "2"
 nix = { workspace = true, features = ["term", "process", "ioctl", "fs"] }
-palaver = "0.2"
 protocol = { version = "0.1", path = "../protocol", package = "job-security-protocol" }
 serde = { version = "1", features = ["derive"] }
 tokio = { workspace = true, features = ["process", "net", "fs", "macros", "signal", "rt", "io-util"] }

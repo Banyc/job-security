@@ -193,7 +193,7 @@ impl Server {
         Pin<Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
     ) {
         let pipe = tokio::net::UnixStream::pair().unwrap();
-        let exe = palaver::env::exe_path().unwrap();
+        let exe = std::env::current_exe().unwrap();
         let mut cmd = tokio::process::Command::new(exe);
         cmd.args(command)
             .env("RUNNER_FD", "3")
