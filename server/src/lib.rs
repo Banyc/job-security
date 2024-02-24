@@ -273,11 +273,7 @@ impl Server {
                 ready = pty.writable(), if !pty_write_buf.is_empty() && !verdict.is_terminated()=> {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
-                        let nbytes = nix::unistd::write(inner.get_ref(), &pty_write_buf[..])?;
-                        if nbytes == 0 {
-                            return Err(std::io::ErrorKind::WouldBlock.into());
-                        }
-                        Ok(nbytes)
+                        Ok(nix::unistd::write(inner.get_ref(), &pty_write_buf[..])?)
                     }) {
                         let nbytes = nbytes?;
                         tracing::debug!("Sent {nbytes} bytes to the pty");
