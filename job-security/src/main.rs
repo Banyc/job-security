@@ -125,9 +125,9 @@ use ui::Tui;
 fn main() -> std::io::Result<ExitCode> {
     let command = Opts::command()
         .subcommand(clap::Command::new("__runner").hide(true))
-        .mut_subcommand("run", |c| {
-            c.mut_arg("args", |a| a.allow_hyphen_values(true).last(true))
-        })
+        // .mut_subcommand("run", |c| {
+        //     c.mut_arg("args", |a| a.allow_hyphen_values(true).last(true))
+        // })
         .mut_subcommand("continue", |c| {
             c.visible_alias("fg").visible_alias("resume")
         })
