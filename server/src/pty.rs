@@ -201,16 +201,13 @@ impl Master {
         unlockpt(&self.fd)
     }
 
+    #[allow(unreachable_code)]
     fn get_slave_name(&self) -> Result<String> {
         #[cfg(target_os = "linux")]
         return nix::pty::ptsname_r(&self.fd);
-        #[cfg(target_os = "macos")]
-        return {
-            let _guard = self.get_slave_name_mutex.lock().unwrap();
-            unsafe { nix::pty::ptsname(&self.fd) }
-        };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        unimplemented!();
+
+        let _guard = self.get_slave_name_mutex.lock().unwrap();
+        unsafe { nix::pty::ptsname(&self.fd) }
     }
 
     fn get_slave_fd(&self) -> Result<OwnedFd> {

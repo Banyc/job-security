@@ -267,9 +267,9 @@ impl Client {
             }
         };
         let res = server_ctrl.into_inner().shutdown().await;
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "macos"))]
         res.unwrap();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         let _ = res;
         tracing::trace!("Connection closed");
         // Drain data_channel
