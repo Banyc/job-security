@@ -538,7 +538,9 @@ impl Server {
                     .await?;
                 let x = runner_ctrl_rx.next().await;
                 let Some(Ok(RunnerEvent::StateChanged(ProcessState::Running, pid))) = &x else {
-                    panic!("{x:?}")
+                    // The runner exited on creation,
+                    // so it's the issue of the command itself
+                    return Ok(());
                 };
                 let runner_shared = Arc::new(ProcessShared {
                     pid: *pid,
@@ -697,7 +699,13 @@ impl Server {
         loop {
             select! {
                 result = listener.accept() => {
-                    let (stream, _) = result?;
+                    let (stream, _) = match result {
+                        Ok(x) => x,
+                        Err(e) => {
+                            tracing::error!("{e}");
+                            continue;
+                        }
+                    };
                     tasks.spawn(Self::handle_new_client(
                         stream,
                         processes.clone(),
@@ -707,7 +715,9 @@ impl Server {
                     ));
                 },
                 Some(res) = tasks.join_next() => {
-                    res.expect("tokio thread panicked")?;
+                    if let Err(e) = res.expect("tokio thread panicked") {
+                        tracing::error!("{e}");
+                    }
                 }
                 _ = quit.recv() => break,
             }
